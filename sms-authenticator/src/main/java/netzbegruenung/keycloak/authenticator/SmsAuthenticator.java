@@ -27,12 +27,7 @@ import netzbegruenung.keycloak.authenticator.credentials.SmsAuthCredentialModel;
 import netzbegruenung.keycloak.authenticator.gateway.SmsServiceFactory;
 
 import org.jboss.logging.Logger;
-import org.keycloak.authentication.CredentialValidator;
-import org.keycloak.authentication.AuthenticationFlowContext;
-import org.keycloak.authentication.AuthenticationFlowError;
-import org.keycloak.authentication.Authenticator;
-import org.keycloak.authentication.RequiredActionFactory;
-import org.keycloak.authentication.RequiredActionProvider;
+import org.keycloak.authentication.*;
 import org.keycloak.common.util.SecretGenerator;
 import org.keycloak.credential.CredentialModel;
 import org.keycloak.credential.CredentialProvider;
@@ -80,6 +75,15 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 		AuthenticationSessionModel authSession = context.getAuthenticationSession();
 		authSession.setAuthNote("code", code);
 		authSession.setAuthNote("ttl", Long.toString(System.currentTimeMillis() + (ttl * 1000L)));
+
+		logger.infof("Validating OTP for phone number: %s of user: %s", mobileNumber, user.getUsername());
+
+		var maxAttemptsReached = SmsAuthenticator.checkAndSetResendCodeMaxAttempts(authSession);
+		if (maxAttemptsReached) {
+			logger.infof("Max OTP reached for setting up 2FA for phone number: %s of user: %s", mobileNumber, user.getUsername());
+			handleMaxAttemptsReached(context);
+			return;
+		}
 
 		try {
 			Theme theme = session.theme().getTheme(Theme.Type.LOGIN);
@@ -167,5 +171,14 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 		}
 		authSession.setAuthNote("sessionVarResendCodeAttempts", Integer.toString(currentAttempts + 1));
 		return false;
+	}
+
+	public void handleMaxAttemptsReached(AuthenticationFlowContext context) {
+		Response challenge = context
+			.form()
+			.setAttribute("realm", context.getRealm())
+			.setError("resendCodeMaxAttemptsReached")
+			.createForm("login-sms.ftl");
+		context.challenge(challenge);
 	}
 }
