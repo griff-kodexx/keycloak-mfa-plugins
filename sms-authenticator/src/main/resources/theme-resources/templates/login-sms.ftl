@@ -89,37 +89,56 @@
 				outline: none;
 			}
 		</style>
-
 		<script>
 			(function() {
 				const resendBtn = document.getElementById('resend-btn');
 				const resendTimer = document.getElementById('resend-timer');
 				const RESEND_URL = window.location.href
+				const COUNTDOWN_TIME = 5; // seconds
+				const STORAGE_KEY = 'resendCooldownUntil';
 
-				let countdown = 5;
-
-				// Format seconds as mm:ss
 				function formatTime(sec) {
 					const m = String(Math.floor(sec / 60)).padStart(2, '0');
 					const s = String(sec % 60).padStart(2, '0');
 					return m + ':' + s;
 				}
 
-				resendTimer.textContent = formatTime(countdown);
+				function startCountdown(secondsLeft) {
+					resendBtn.disabled = true;
+					resendBtn.classList.remove('active');
+					resendBtn.innerHTML = "Resend – <span id='resend-timer'>" + formatTime(secondsLeft) + "</span>";
 
-				const timer = setInterval(() => {
-					countdown--;
-					resendTimer.textContent = formatTime(countdown);
-					if (countdown <= 0) {
-						clearInterval(timer);
-						resendBtn.disabled = false;
-						resendBtn.classList.add('active');
-						resendBtn.textContent = 'Resend';
-					}
-				}, 1000);
+					const timerInterval = setInterval(() => {
+						secondsLeft--;
+						const timerSpan = document.getElementById('resend-timer');
+						if (timerSpan) timerSpan.textContent = formatTime(secondsLeft);
+
+						if (secondsLeft <= 0) {
+							clearInterval(timerInterval);
+							localStorage.removeItem(STORAGE_KEY);
+							resendBtn.disabled = false;
+							resendBtn.classList.add('active');
+							resendBtn.textContent = 'Resend';
+						}
+					}, 1000);
+				}
+
+				// --- Resume timer logic on page load ---
+				const now = Date.now();
+				const storedExpire = parseInt(localStorage.getItem(STORAGE_KEY), 10);
+				const secondsLeft = storedExpire ? Math.max(0, Math.ceil((storedExpire - now) / 1000)) : COUNTDOWN_TIME;
+
+				if (storedExpire && now < storedExpire) {
+					startCountdown(secondsLeft);
+				} else {
+					resendBtn.disabled = false;
+					resendBtn.classList.add('active');
+					resendBtn.textContent = 'Resend';
+				}
 
 				resendBtn.addEventListener('click', () => {
 					if (resendBtn.disabled) return;
+
 					resendBtn.disabled = true;
 					resendBtn.classList.remove('active');
 					resendBtn.textContent = 'Sending...';
@@ -128,15 +147,22 @@
 						.then(resp => {
 							if (!resp.ok) throw new Error('Failed to resend');
 							resendBtn.textContent = 'Code Sent!';
-							setTimeout(() => location.reload(), 1500);
+							const cooldownUntil = Date.now() + COUNTDOWN_TIME * 1000;
+							localStorage.setItem(STORAGE_KEY, cooldownUntil);
+							setTimeout(() => startCountdown(COUNTDOWN_TIME), 1000);
 						})
 						.catch(() => {
 							resendBtn.textContent = 'Error. Try Again';
-							setTimeout(() => location.reload(), 2000);
+							setTimeout(() => {
+								resendBtn.textContent = 'Resend';
+								resendBtn.disabled = false;
+								resendBtn.classList.add('active');
+							}, 2000);
 						});
 				});
 			})();
 		</script>
+
 
     <#elseif section == "info">
         ${msg("smsAuthInstruction")}
