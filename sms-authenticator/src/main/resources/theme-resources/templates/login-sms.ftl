@@ -76,7 +76,7 @@
 			}
 
 			.resend-btn.active {
-				color: #652171; /* your brand color */
+				color: #652171; /* brand color */
 				cursor: pointer;
 				font-weight: 600;
 			}
@@ -89,13 +89,12 @@
 				outline: none;
 			}
 		</style>
+
 		<script>
 			(function() {
-
 				const resendBtn = document.getElementById('resend-btn');
-				const resendTimer = document.getElementById('resend-timer');
 				const RESEND_URL = window.location.href;
-				const COUNTDOWN_TIME = 10; // seconds
+				const COUNTDOWN_TIME = 60; // seconds
 				const STORAGE_KEY = 'resendCooldownUntil';
 
 				function formatTime(sec) {
@@ -124,6 +123,23 @@
 					}, 1000);
 				}
 
+				function disableResendWithMessage(message) {
+					resendBtn.disabled = true;
+					resendBtn.classList.remove('active');
+					resendBtn.style.opacity = '0.6';
+					resendBtn.style.cursor = 'not-allowed';
+					resendBtn.textContent = message || 'Limit reached';
+					localStorage.removeItem(STORAGE_KEY);
+				}
+
+				// --- Handle error message ---
+				const feedback = document.querySelector('.kc-feedback-text');
+				if (feedback && feedback.textContent.includes('Maximum OTP attempts')) {
+					console.warn('OTP limit reached');
+					disableResendWithMessage('Limit reached');
+					return; // stop further logic
+				}
+
 				// --- Resume or start timer on page load ---
 				const now = Date.now();
 				const storedExpire = parseInt(localStorage.getItem(STORAGE_KEY), 10);
@@ -139,6 +155,7 @@
 					startCountdown(COUNTDOWN_TIME);
 				}
 
+				// --- Click event handler ---
 				resendBtn.addEventListener('click', () => {
 					if (resendBtn.disabled) return;
 
@@ -165,8 +182,6 @@
 				});
 			})();
 		</script>
-
-
 
     <#elseif section == "info">
         ${msg("smsAuthInstruction")}
