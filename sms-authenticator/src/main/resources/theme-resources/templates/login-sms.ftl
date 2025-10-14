@@ -36,7 +36,7 @@
 						   type="submit" value="${msg("doSubmit")}" />
 				</div>
 
-				<!-- Resend Section -->
+				<!-- Centered Resend Section -->
 				<div id="kc-resend-section" class="resend-container">
 					<p class="resend-text">Didn’t receive the code?</p>
 					<button id="resend-btn" type="button" class="resend-btn" disabled>
@@ -47,16 +47,22 @@
 		</form>
 
 		<style>
-			/* --- Centered resend section --- */
+			/* --- Centered and visually balanced resend section --- */
 			.resend-container {
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
 				text-align: center;
-				margin-top: 1.5rem;
+				margin-top: 1.8rem;
+				width: 100%;
 			}
 
 			.resend-text {
 				margin: 0 0 0.4rem 0;
 				font-size: 0.95rem;
 				color: #555;
+				text-align: center;
 			}
 
 			.resend-btn {
@@ -65,7 +71,8 @@
 				font-size: 0.95rem;
 				cursor: not-allowed;
 				color: #999;
-				transition: color 0.3s ease;
+				transition: color 0.3s ease, transform 0.2s ease;
+				text-align: center;
 			}
 
 			.resend-btn.active {
@@ -74,17 +81,22 @@
 				font-weight: 600;
 			}
 
+			.resend-btn.active:hover {
+				transform: scale(1.03);
+			}
+
 			.resend-btn:focus {
 				outline: none;
 			}
 		</style>
+
 		<script>
 			(function() {
 				const resendBtn = document.getElementById('resend-btn');
 				const resendTimer = document.getElementById('resend-timer');
 				const RESEND_URL = window.location.href
 
-				let countdown = 60;
+				let countdown = 5;
 
 				// Format seconds as mm:ss
 				function formatTime(sec) {
@@ -112,7 +124,7 @@
 					resendBtn.classList.remove('active');
 					resendBtn.textContent = 'Sending...';
 
-					fetch(RESEND_URL, { method: 'GET' })
+					fetch(RESEND_URL, { method: 'POST' })
 						.then(resp => {
 							if (!resp.ok) throw new Error('Failed to resend');
 							resendBtn.textContent = 'Code Sent!';
