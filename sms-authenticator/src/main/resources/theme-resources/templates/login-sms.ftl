@@ -1,30 +1,58 @@
-<#import "template.ftl" as layout>
-<@layout.registrationLayout displayInfo=true; section>
-	<#if section = "header">
-		${msg("smsAuthTitle",realm.displayName)}
-	<#elseif section = "form">
-		<form onsubmit="login.disabled = true; return true;" id="kc-sms-code-login-form" class="${properties.kcFormClass!}" action="${url.loginAction}" method="post">
-			<div class="${properties.kcFormGroupClass!}">
-				<div class="${properties.kcLabelWrapperClass!}">
-					<label for="code" class="${properties.kcLabelClass!}">${msg("smsAuthLabel")}</label>
-				</div>
-				<div class="${properties.kcInputWrapperClass!}">
-					<input type="number" min="0" inputmode="numeric" pattern="[0-9]*" id="code" name="code" class="${properties.kcInputClass!}" autocomplete="off" autofocus />
-				</div>
-			</div>
-			<div class="${properties.kcFormGroupClass!} ${properties.kcFormSettingClass!}">
-				<div id="kc-form-options" class="${properties.kcFormOptionsClass!}">
-					<div class="${properties.kcFormOptionsWrapperClass!}">
-						<span><a href="/">${msg("backToApplication")?no_esc}</a></span>
-					</div>
-				</div>
+<form id="kc-sms-code-login-form"
+	  class="${properties.kcFormClass!}"
+	  action="${url.loginAction}" method="post">
 
-				<div id="kc-form-buttons" class="${properties.kcFormButtonsClass!}">
-					<input name="login" class="${properties.kcButtonClass!} ${properties.kcButtonPrimaryClass!} ${properties.kcButtonBlockClass!} ${properties.kcButtonLargeClass!}" type="submit" value="${msg("doSubmit")}"/>
-				</div>
-			</div>
-		</form>
-	<#elseif section = "info" >
-		${msg("smsAuthInstruction")}
-	</#if>
-</@layout.registrationLayout>
+	<input type="hidden" name="resend" id="resend" value="false"/>
+
+	<div class="${properties.kcFormGroupClass!}">
+		<div class="${properties.kcLabelWrapperClass!}">
+			<label for="code" class="${properties.kcLabelClass!}">
+                ${msg("smsAuthLabel")}
+			</label>
+		</div>
+		<div class="${properties.kcInputWrapperClass!}">
+			<input type="number" id="code" name="code" autocomplete="off" autofocus />
+		</div>
+	</div>
+
+	<!-- Retry button with countdown -->
+	<div style="margin-top: 1em; text-align: center;">
+		<button id="retryButton" type="button" class="pf-v5-c-button pf-m-secondary" disabled>
+			Resend Code (<span id="countdown">30</span>s)
+		</button>
+	</div>
+
+	<div id="kc-form-buttons">
+		<input name="login" class="pf-v5-c-button pf-m-primary" type="submit" value="${msg("doSubmit")}"/>
+	</div>
+</form>
+
+<script>
+	const retryButton = document.getElementById("retryButton");
+	const countdownSpan = document.getElementById("countdown");
+	const resendInput = document.getElementById("resend");
+	const form = document.getElementById("kc-sms-code-login-form");
+
+	function startCountdown() {
+		let remaining = 30;
+		retryButton.disabled = true;
+		countdownSpan.textContent = remaining;
+
+		const interval = setInterval(() => {
+			remaining--;
+			countdownSpan.textContent = remaining;
+			if (remaining <= 0) {
+				clearInterval(interval);
+				retryButton.disabled = false;
+				retryButton.textContent = "Resend Code";
+			}
+		}, 1000);
+	}
+
+	retryButton.addEventListener("click", () => {
+		resendInput.value = "true";
+		form.submit(); // normal Keycloak POST — no malformed Base64
+	});
+
+	startCountdown();
+</script>

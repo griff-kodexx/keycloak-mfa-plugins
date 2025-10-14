@@ -123,14 +123,11 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 			}
 		} else {
 			// invalid
+			//Always return error to stay on same page and allow retry
 			AuthenticationExecutionModel execution = context.getExecution();
-			if (execution.isRequired()) {
-				context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
-					context.form().setAttribute("realm", context.getRealm())
-						.setError("smsAuthCodeInvalid").createForm(TPL_CODE));
-			} else if (execution.isConditional() || execution.isAlternative()) {
-				context.attempted();
-			}
+			context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
+				context.form().setAttribute("realm", context.getRealm())
+					.setError("smsAuthCodeInvalid").createForm(TPL_CODE));
 		}
 	}
 
@@ -160,5 +157,15 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 	@Override
 	public SmsAuthCredentialProvider getCredentialProvider(KeycloakSession session) {
 		return (SmsAuthCredentialProvider)session.getProvider(CredentialProvider.class, SmsAuthCredentialProviderFactory.PROVIDER_ID);
+	}
+
+	public static boolean checkAndSetResendCodeMaxAttempts(AuthenticationSessionModel authSession) {
+		int max = 5;
+        int currentAttempts = Integer.parseInt((authSession.getAuthNote("sessionVarResendCodeAttempts") != null ? authSession.getAuthNote("sessionVarResendCodeAttempts") : "0"));
+		if (currentAttempts >= max) {
+			return true;
+		}
+		authSession.setAuthNote("sessionVarResendCodeAttempts", Integer.toString(currentAttempts + 1));
+		return false;
 	}
 }
