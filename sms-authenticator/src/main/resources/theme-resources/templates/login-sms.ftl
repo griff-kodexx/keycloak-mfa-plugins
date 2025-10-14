@@ -91,10 +91,11 @@
 		</style>
 		<script>
 			(function() {
+
 				const resendBtn = document.getElementById('resend-btn');
 				const resendTimer = document.getElementById('resend-timer');
-				const RESEND_URL = window.location.href
-				const COUNTDOWN_TIME = 5; // seconds
+				const RESEND_URL = window.location.href;
+				const COUNTDOWN_TIME = 10; // seconds
 				const STORAGE_KEY = 'resendCooldownUntil';
 
 				function formatTime(sec) {
@@ -123,17 +124,19 @@
 					}, 1000);
 				}
 
-				// --- Resume timer logic on page load ---
+				// --- Resume or start timer on page load ---
 				const now = Date.now();
 				const storedExpire = parseInt(localStorage.getItem(STORAGE_KEY), 10);
-				const secondsLeft = storedExpire ? Math.max(0, Math.ceil((storedExpire - now) / 1000)) : COUNTDOWN_TIME;
 
 				if (storedExpire && now < storedExpire) {
+					// Continue from stored time
+					const secondsLeft = Math.max(0, Math.ceil((storedExpire - now) / 1000));
 					startCountdown(secondsLeft);
 				} else {
-					resendBtn.disabled = false;
-					resendBtn.classList.add('active');
-					resendBtn.textContent = 'Resend';
+					// Always start fresh countdown on first load
+					const cooldownUntil = now + COUNTDOWN_TIME * 1000;
+					localStorage.setItem(STORAGE_KEY, cooldownUntil);
+					startCountdown(COUNTDOWN_TIME);
 				}
 
 				resendBtn.addEventListener('click', () => {
@@ -162,6 +165,7 @@
 				});
 			})();
 		</script>
+
 
 
     <#elseif section == "info">
