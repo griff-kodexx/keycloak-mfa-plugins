@@ -64,6 +64,14 @@ public class PhoneValidationRequiredAction implements RequiredActionProvider, Cr
 			String mobileNumber = authSession.getAuthNote("mobile_number");
 			logger.infof("Validating phone number: %s of user: %s", mobileNumber, user.getUsername());
 
+			var maxAttemptsReached = SmsAuthenticator.checkAndSetResendCodeMaxAttempts(authSession);
+			if (maxAttemptsReached) {
+				logger.infof("Max OTP reached for setting up 2FA for phone number: %s of user: %s", mobileNumber, user.getUsername());
+				handleMaxAttemptsReached(context);
+				return;
+			}
+
+
 			int length = Integer.parseInt(config.getConfig().get("length"));
 			int ttl = Integer.parseInt(config.getConfig().get("ttl"));
 
@@ -152,5 +160,14 @@ public class PhoneValidationRequiredAction implements RequiredActionProvider, Cr
 	@Override
 	public String getCredentialType(KeycloakSession keycloakSession, AuthenticationSessionModel authenticationSessionModel) {
 		return SmsAuthCredentialModel.TYPE;
+	}
+
+	public void handleMaxAttemptsReached(RequiredActionContext context) {
+		Response challenge = context
+			.form()
+			.setAttribute("realm", context.getRealm())
+			.setError("resendCodeMaxAttemptsReached")
+			.createForm("login-sms.ftl");
+		context.challenge(challenge);
 	}
 }
