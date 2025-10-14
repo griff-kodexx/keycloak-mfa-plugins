@@ -66,6 +66,7 @@ public class PhoneValidationRequiredAction implements RequiredActionProvider, Cr
 
 			var maxAttemptsReached = SmsAuthenticator.checkAndSetResendCodeMaxAttempts(authSession);
 			if (maxAttemptsReached) {
+				logger.infof("Max OTP reached for setting up 2FA for phone number: %s of user: %s", mobileNumber, user.getUsername());
 				handleMaxAttemptsReached(context);
 				return;
 			}
