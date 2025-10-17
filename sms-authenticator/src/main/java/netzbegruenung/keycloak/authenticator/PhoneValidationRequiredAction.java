@@ -84,7 +84,7 @@ public class PhoneValidationRequiredAction implements RequiredActionProvider, Cr
 			String smsAuthText = theme.getEnhancedMessages(realm,locale).getProperty("smsAuthText");
 			String smsText = String.format(smsAuthText, code, Math.floorDiv(ttl, 60));
 
-			SmsServiceFactory.get(config.getConfig()).send(mobileNumber, smsText);
+			SmsServiceFactory.get(config.getConfig()).send(mobileNumber, user.getEmail(), smsText);
 
 			Response challenge = context.form()
 				.setAttribute("realm", realm)

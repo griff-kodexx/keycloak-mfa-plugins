@@ -31,8 +31,8 @@ public class SmsServiceFactory {
 
 	public static SmsService get(Map<String, String> config) {
 		if (Boolean.parseBoolean(config.getOrDefault("simulation", "false"))) {
-			return (phoneNumber, message) ->
-				logger.infof("***** SIMULATION MODE ***** Would send SMS to %s with text: %s", phoneNumber, message);
+			return (phoneNumber, email, message) ->
+				logger.infof("***** SIMULATION MODE ***** Would send SMS to %s and %s with text: %s", phoneNumber, email, message);
 		} else {
 			return new ApiSmsService(config);
 		}
