@@ -84,6 +84,7 @@ public class SmsAuthenticatorFactory implements AuthenticatorFactory {
 			new ProviderConfigProperty("apitoken", "API Secret (optional)", "Your API secret. If a Basic Auth user is set, this will be the Basic Auth password.", ProviderConfigProperty.STRING_TYPE, "changeme"),
 			new ProviderConfigProperty("apiuser", "Basic Auth Username (optional)", "If set, Basic Auth will be performed. Leave empty if not required.", ProviderConfigProperty.STRING_TYPE, ""),
 			new ProviderConfigProperty("messageattribute", "Message Attribute", "The attribute that contains the SMS message text.", ProviderConfigProperty.STRING_TYPE, "text"),
+			new ProviderConfigProperty("emailAttribute", "Receiver Email Address Attribute", "The attribute that contains the receiver email address.", ProviderConfigProperty.STRING_TYPE, "email"),
 			new ProviderConfigProperty("receiverattribute", "Receiver Phone Number Attribute", "The attribute that contains the receiver phone number.", ProviderConfigProperty.STRING_TYPE, "to"),
 			new ProviderConfigProperty("receiverJsonTemplate", "Receiver Phone Number Json value template", "Receiver value structure can be customised to match API requirements.", ProviderConfigProperty.STRING_TYPE, "\"%s\""),
 			new ProviderConfigProperty("senderattribute", "Sender Phone Number Attribute", "The attribute that contains the sender phone number. Leave empty if not required.", ProviderConfigProperty.STRING_TYPE, "from"),

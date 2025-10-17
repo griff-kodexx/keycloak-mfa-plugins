@@ -86,16 +86,16 @@ public class ApiSmsService implements SmsService{
 		hideResponsePayload = Boolean.parseBoolean(config.get("hideResponsePayload"));
 	}
 
-	public void send(String phoneNumber, String message) {
+	public void send(String phoneNumber, String email, String message) {
 		phoneNumber = clean_phone_number(phoneNumber, countrycode);
 		Builder request_builder;
 		HttpRequest request = null;
 		var client = HttpClient.newHttpClient();
 		try {
 			if (urlencode) {
-				request_builder = urlencoded_request(phoneNumber, message);
+				request_builder = urlencoded_request(phoneNumber, email, message);
 			} else {
-				request_builder = json_request(phoneNumber, message);
+				request_builder = json_request(phoneNumber,email, message);
 			}
 
 			if (apiTokenInHeader) {
@@ -120,11 +120,12 @@ public class ApiSmsService implements SmsService{
 		}
 	}
 
-	public Builder json_request(String phoneNumber, String message) {
+	public Builder json_request(String phoneNumber, String email, String message) {
 		String sendJson = jsonTemplate.isBlank() ? "{"
 						  + (apiTokenInHeader ? "" : Optional.ofNullable(apitokenattribute).map(it -> String.format("\"%s\":\"%s\",", it, apitoken)).orElse(""))
 						  + (useUuid ? String.format("\"%s\":\"%s\",", uuidAttribute, UUID.randomUUID()) : "")
 						  + String.format("\"%s\":\"%s\",", messageattribute, message)
+						  + String.format("\"%s\":\"%s\",", email, email)
 						  + String.format("\"%s\":%s,", receiverattribute, String.format(receiverJsonTemplate, phoneNumber))
 						  + String.format("\"%s\":\"%s\"", senderattribute, senderId)
 						  + "}"
@@ -142,11 +143,12 @@ public class ApiSmsService implements SmsService{
 			String.format(jsonTemplate, phoneNumber, message);
 	}
 
-	public Builder urlencoded_request(String phoneNumber, String message) {
+	public Builder urlencoded_request(String phoneNumber, String email, String message) {
 		String body = (apiTokenInHeader ? "" : Optional.ofNullable(apitokenattribute)
 						  .map(it -> String.format("%s=%s&", it, URLEncoder.encode(apitoken, Charset.defaultCharset()))).orElse(""))
 					  + (useUuid ? String.format("%s=%s&", uuidAttribute, URLEncoder.encode(UUID.randomUUID().toString(), Charset.defaultCharset())) : "")
 					  + String.format("%s=%s&", messageattribute, URLEncoder.encode(message, Charset.defaultCharset()))
+					  + String.format("%s=%s&", email, URLEncoder.encode(email, Charset.defaultCharset()))
 					  + String.format("%s=%s&", receiverattribute, URLEncoder.encode(phoneNumber, Charset.defaultCharset()))
 					  + String.format("%s=%s", senderattribute, URLEncoder.encode(senderId, Charset.defaultCharset()));
 
