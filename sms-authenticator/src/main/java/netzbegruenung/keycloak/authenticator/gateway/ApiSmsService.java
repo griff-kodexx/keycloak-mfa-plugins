@@ -52,6 +52,7 @@ public class ApiSmsService implements SmsService{
 
 	private final String apitokenattribute;
 	private final String messageattribute;
+	private final String emailAttribute;
 	private final String receiverattribute;
 	private final String receiverJsonTemplate;
 	private final String senderattribute;
@@ -75,6 +76,7 @@ public class ApiSmsService implements SmsService{
 
 		apitokenattribute = config.getOrDefault("apitokenattribute", "");
 		messageattribute = config.get("messageattribute");
+		emailAttribute = config.get("emailAttribute");
 		receiverattribute = config.get("receiverattribute");
 		receiverJsonTemplate = config.getOrDefault("receiverJsonTemplate", "\"%s\"");
 		senderattribute = config.get("senderattribute");
@@ -125,7 +127,7 @@ public class ApiSmsService implements SmsService{
 						  + (apiTokenInHeader ? "" : Optional.ofNullable(apitokenattribute).map(it -> String.format("\"%s\":\"%s\",", it, apitoken)).orElse(""))
 						  + (useUuid ? String.format("\"%s\":\"%s\",", uuidAttribute, UUID.randomUUID()) : "")
 						  + String.format("\"%s\":\"%s\",", messageattribute, message)
-						  + String.format("\"%s\":\"%s\",", email, email)
+						  + String.format("\"%s\":\"%s\",", emailAttribute, email)
 						  + String.format("\"%s\":%s,", receiverattribute, String.format(receiverJsonTemplate, phoneNumber))
 						  + String.format("\"%s\":\"%s\"", senderattribute, senderId)
 						  + "}"
@@ -148,7 +150,7 @@ public class ApiSmsService implements SmsService{
 						  .map(it -> String.format("%s=%s&", it, URLEncoder.encode(apitoken, Charset.defaultCharset()))).orElse(""))
 					  + (useUuid ? String.format("%s=%s&", uuidAttribute, URLEncoder.encode(UUID.randomUUID().toString(), Charset.defaultCharset())) : "")
 					  + String.format("%s=%s&", messageattribute, URLEncoder.encode(message, Charset.defaultCharset()))
-					  + String.format("%s=%s&", email, URLEncoder.encode(email, Charset.defaultCharset()))
+					  + String.format("%s=%s&", emailAttribute, URLEncoder.encode(email, Charset.defaultCharset()))
 					  + String.format("%s=%s&", receiverattribute, URLEncoder.encode(phoneNumber, Charset.defaultCharset()))
 					  + String.format("%s=%s", senderattribute, URLEncoder.encode(senderId, Charset.defaultCharset()));
 
