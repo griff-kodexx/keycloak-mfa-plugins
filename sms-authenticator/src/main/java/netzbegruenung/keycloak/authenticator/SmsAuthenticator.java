@@ -31,16 +31,19 @@ import org.keycloak.authentication.*;
 import org.keycloak.common.util.SecretGenerator;
 import org.keycloak.credential.CredentialModel;
 import org.keycloak.credential.CredentialProvider;
-import org.keycloak.models.AuthenticationExecutionModel;
 import org.keycloak.models.AuthenticatorConfigModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.sessions.AuthenticationSessionModel;
+import org.keycloak.events.Errors;
+import org.keycloak.services.managers.BruteForceProtector;
 import org.keycloak.theme.Theme;
 import org.keycloak.util.JsonSerialization;
 
 import jakarta.ws.rs.core.Response;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.Locale;
 import java.util.Optional;
 import java.io.IOException;
@@ -58,6 +61,10 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 		KeycloakSession session = context.getSession();
 		UserModel user = context.getUser();
 		RealmModel realm = context.getRealm();
+
+		if (isTemporarilyLockedOut(context)) {
+			return;
+		}
 
 		Optional<CredentialModel> model = context.getUser().credentialManager().getStoredCredentialsByTypeStream(SmsAuthCredentialModel.TYPE).findFirst();
 		String mobileNumber;
@@ -103,8 +110,6 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 
 	@Override
 	public void action(AuthenticationFlowContext context) {
-		String enteredCode = context.getHttpRequest().getDecodedFormParameters().getFirst("code");
-
 		AuthenticationSessionModel authSession = context.getAuthenticationSession();
 		String code = authSession.getAuthNote("code");
 		String ttl = authSession.getAuthNote("ttl");
@@ -115,24 +120,93 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 			return;
 		}
 
-		boolean isValid = enteredCode.equals(code);
-		if (isValid) {
-			if (Long.parseLong(ttl) < System.currentTimeMillis()) {
-				// expired
-				context.failureChallenge(AuthenticationFlowError.EXPIRED_CODE,
-					context.form().setError("smsAuthCodeExpired").createErrorPage(Response.Status.BAD_REQUEST));
-			} else {
-				// valid
-				context.success();
-			}
-		} else {
-			// invalid
-			//Always return error to stay on same page and allow retry
-			AuthenticationExecutionModel execution = context.getExecution();
-			context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
-				context.form().setAttribute("realm", context.getRealm())
-					.setError("smsAuthCodeInvalid").createForm(TPL_CODE));
+		// If brute force protection already locked the user mid-session, stop here.
+		if (isTemporarilyLockedOut(context)) {
+			return;
 		}
+
+		String enteredCode = context.getHttpRequest().getDecodedFormParameters().getFirst("code");
+		// Constant-time comparison to avoid leaking the code via timing.
+		boolean isValid = enteredCode != null && MessageDigest.isEqual(
+			enteredCode.getBytes(StandardCharsets.UTF_8), code.getBytes(StandardCharsets.UTF_8));
+
+		if (isValid && Long.parseLong(ttl) >= System.currentTimeMillis()) {
+			// Valid and not expired: consume the code so it can never be replayed.
+			invalidateCode(authSession);
+			context.success();
+			return;
+		}
+
+		if (isValid) {
+			// Correct but expired: still consume it.
+			invalidateCode(authSession);
+			context.failureChallenge(AuthenticationFlowError.EXPIRED_CODE,
+				context.form().setError("smsAuthCodeExpired").createErrorPage(Response.Status.BAD_REQUEST));
+			return;
+		}
+
+		// Wrong code: count the failed attempt per-session and feed Keycloak's
+		// per-user brute force protector (which persists across login sessions,
+		// so re-authenticating with the password does not reset the limit).
+		int maxAttempts = getMaxVerifyAttempts(context);
+		int attempts = Integer.parseInt(
+			authSession.getAuthNote(AUTH_NOTE_VERIFY_ATTEMPTS) != null
+				? authSession.getAuthNote(AUTH_NOTE_VERIFY_ATTEMPTS) : "0") + 1;
+		authSession.setAuthNote(AUTH_NOTE_VERIFY_ATTEMPTS, Integer.toString(attempts));
+
+		context.getEvent().user(context.getUser()).error(Errors.INVALID_USER_CREDENTIALS);
+		RealmModel realm = context.getRealm();
+		if (realm.isBruteForceProtected()) {
+			context.getProtector().failedLogin(realm, context.getUser(),
+				context.getConnection(), context.getUriInfo());
+		}
+
+		if (attempts >= maxAttempts) {
+			// Too many wrong guesses: invalidate the code and terminate the flow.
+			// The user must restart authentication, which is itself resend-capped.
+			invalidateCode(authSession);
+			logger.warnf("Max OTP verification attempts (%d) reached for user: %s; failing authentication",
+				maxAttempts, context.getUser().getUsername());
+			context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
+				context.form().setError("smsAuthMaxAttemptsReached").createErrorPage(Response.Status.BAD_REQUEST));
+			return;
+		}
+
+		context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
+			context.form().setAttribute("realm", context.getRealm())
+				.setError("smsAuthCodeInvalid").createForm(TPL_CODE));
+	}
+
+	private static final String AUTH_NOTE_VERIFY_ATTEMPTS = "verifyAttempts";
+
+	private static int getMaxVerifyAttempts(AuthenticationFlowContext context) {
+		String configured = context.getAuthenticatorConfig() != null
+			? context.getAuthenticatorConfig().getConfig().get("maxVerifyAttempts") : null;
+		try {
+			int value = Integer.parseInt(configured);
+			return value > 0 ? value : 3;
+		} catch (NumberFormatException e) {
+			return 3;
+		}
+	}
+
+	private static void invalidateCode(AuthenticationSessionModel authSession) {
+		authSession.removeAuthNote("code");
+		authSession.removeAuthNote("ttl");
+		authSession.removeAuthNote(AUTH_NOTE_VERIFY_ATTEMPTS);
+	}
+
+	private boolean isTemporarilyLockedOut(AuthenticationFlowContext context) {
+		RealmModel realm = context.getRealm();
+		UserModel user = context.getUser();
+		if (user != null && realm.isBruteForceProtected()
+			&& context.getProtector().isTemporarilyDisabled(context.getSession(), realm, user)) {
+			logger.warnf("User %s is temporarily locked out by brute force protection; blocking OTP step",
+				user.getUsername());
+			context.failure(AuthenticationFlowError.USER_TEMPORARILY_DISABLED);
+			return true;
+		}
+		return false;
 	}
 
 	@Override
