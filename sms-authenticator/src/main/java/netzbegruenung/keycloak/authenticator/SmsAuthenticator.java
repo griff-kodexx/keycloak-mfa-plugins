@@ -37,7 +37,6 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.events.Errors;
-import org.keycloak.services.managers.BruteForceProtector;
 import org.keycloak.theme.Theme;
 import org.keycloak.util.JsonSerialization;
 
@@ -126,8 +125,17 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 		}
 
 		String enteredCode = context.getHttpRequest().getDecodedFormParameters().getFirst("code");
+		if (enteredCode == null || enteredCode.isBlank()) {
+			// No code submitted (e.g. the resend button POSTs with no "code"
+			// parameter, or an empty form). Re-prompt WITHOUT counting this as a
+			// failed verification attempt, so resend/empty submits cannot lock
+			// the user out or trip brute force protection.
+			context.challenge(context.form().setAttribute("realm", context.getRealm()).createForm(TPL_CODE));
+			return;
+		}
+
 		// Constant-time comparison to avoid leaking the code via timing.
-		boolean isValid = enteredCode != null && MessageDigest.isEqual(
+		boolean isValid = MessageDigest.isEqual(
 			enteredCode.getBytes(StandardCharsets.UTF_8), code.getBytes(StandardCharsets.UTF_8));
 
 		if (isValid && Long.parseLong(ttl) >= System.currentTimeMillis()) {
@@ -203,7 +211,8 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 			&& context.getProtector().isTemporarilyDisabled(context.getSession(), realm, user)) {
 			logger.warnf("User %s is temporarily locked out by brute force protection; blocking OTP step",
 				user.getUsername());
-			context.failure(AuthenticationFlowError.USER_TEMPORARILY_DISABLED);
+			context.failureChallenge(AuthenticationFlowError.USER_TEMPORARILY_DISABLED,
+				context.form().setError("smsAuthAccountLocked").createErrorPage(Response.Status.UNAUTHORIZED));
 			return true;
 		}
 		return false;
