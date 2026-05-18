@@ -31,6 +31,7 @@ import org.keycloak.authentication.RequiredActionContext;
 import org.keycloak.authentication.RequiredActionProvider;
 import org.keycloak.common.util.SecretGenerator;
 import org.keycloak.credential.CredentialProvider;
+import org.keycloak.events.Errors;
 import org.keycloak.models.AuthenticatorConfigModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
@@ -40,6 +41,9 @@ import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.theme.Theme;
 
 import java.util.Locale;
+import java.util.Map;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import jakarta.ws.rs.core.Response;
 
 public class PhoneValidationRequiredAction implements RequiredActionProvider, CredentialRegistrator {
@@ -60,6 +64,21 @@ public class PhoneValidationRequiredAction implements RequiredActionProvider, Cr
 			AuthenticationSessionModel authSession = context.getAuthenticationSession();
 			// TODO: get the alias from somewhere else or move config into realm or application scope
 			AuthenticatorConfigModel config = context.getRealm().getAuthenticatorConfigByAlias("sms-2fa");
+			Map<String, String> cfgMap = (config != null && config.getConfig() != null) ? config.getConfig() : Map.of();
+
+			if (OtpThrottling.isLocked(context.getSession(), realm, user)) {
+				logger.warnf("User %s is locked out of OTP; blocking phone validation", user.getUsername());
+				context.challenge(context.form().setError("smsAuthAccountLocked").createErrorPage(Response.Status.UNAUTHORIZED));
+				return;
+			}
+
+			int maxSends = OtpThrottling.intConfig(cfgMap, "maxOtpSends", 5);
+			int sendWindow = OtpThrottling.intConfig(cfgMap, "otpLockoutSeconds", 900);
+			if (OtpThrottling.registerSendAndIsExceeded(context.getSession(), realm, user, maxSends, sendWindow)) {
+				logger.warnf("User %s exceeded OTP send budget (%d); refusing to send", user.getUsername(), maxSends);
+				context.challenge(context.form().setError("resendCodeMaxAttemptsReached").createErrorPage(Response.Status.TOO_MANY_REQUESTS));
+				return;
+			}
 
 			String mobileNumber = authSession.getAuthNote("mobile_number");
 			logger.infof("Validating phone number: %s of user: %s", mobileNumber, user.getUsername());
@@ -98,6 +117,15 @@ public class PhoneValidationRequiredAction implements RequiredActionProvider, Cr
 
 	@Override
 	public void processAction(RequiredActionContext context) {
+		UserModel user = context.getUser();
+		RealmModel realm = context.getRealm();
+
+		if (OtpThrottling.isLocked(context.getSession(), realm, user)) {
+			logger.warnf("User %s is locked out of OTP; blocking phone validation", user.getUsername());
+			context.challenge(context.form().setError("smsAuthAccountLocked").createErrorPage(Response.Status.UNAUTHORIZED));
+			return;
+		}
+
 		String enteredCode = context.getHttpRequest().getDecodedFormParameters().getFirst("code");
 
 		AuthenticationSessionModel authSession = context.getAuthenticationSession();
@@ -105,32 +133,58 @@ public class PhoneValidationRequiredAction implements RequiredActionProvider, Cr
 		String code = authSession.getAuthNote("code");
 		String ttl = authSession.getAuthNote("ttl");
 
-		if (code == null || ttl == null || enteredCode == null) {
-			logger.warn("Phone number is not set");
+		if (code == null || ttl == null || enteredCode == null || enteredCode.isBlank()) {
+			// Missing state, or no code submitted (e.g. the resend button POSTs
+			// with no "code"): re-prompt WITHOUT counting it as a failure.
 			handleInvalidSmsCode(context);
 			return;
 		}
 
-		boolean isValid = enteredCode.equals(code);
-		if (isValid && Long.parseLong(ttl) > System.currentTimeMillis()) {
-			// valid
+		// Constant-time comparison to avoid leaking the code via timing.
+		boolean matches = MessageDigest.isEqual(
+			enteredCode.getBytes(StandardCharsets.UTF_8), code.getBytes(StandardCharsets.UTF_8));
+
+		if (matches && Long.parseLong(ttl) > System.currentTimeMillis()) {
+			// valid: register the credential and clear OTP counters for the user
 			SmsAuthCredentialProvider smnp = (SmsAuthCredentialProvider) context.getSession().getProvider(CredentialProvider.class, "mobile-number");
-			if (!smnp.isConfiguredFor(context.getRealm(), context.getUser(), SmsAuthCredentialModel.TYPE)) {
-				smnp.createCredential(context.getRealm(), context.getUser(), SmsAuthCredentialModel.createSmsAuthenticator(mobileNumber));
+			if (!smnp.isConfiguredFor(realm, user, SmsAuthCredentialModel.TYPE)) {
+				smnp.createCredential(realm, user, SmsAuthCredentialModel.createSmsAuthenticator(mobileNumber));
 			} else {
 				smnp.updateCredential(
-					context.getRealm(),
-					context.getUser(),
+					realm,
+					user,
 					new UserCredentialModel("random_id", "mobile-number", mobileNumber)
 				);
 			}
-			context.getUser().removeRequiredAction(PhoneNumberRequiredAction.PROVIDER_ID);
+			OtpThrottling.clear(context.getSession(), realm, user);
+			user.removeRequiredAction(PhoneNumberRequiredAction.PROVIDER_ID);
 			handlePhoneToAttribute(context, mobileNumber);
 			context.success();
-		} else {
-			// invalid or expired
-			handleInvalidSmsCode(context);
+			return;
 		}
+
+		if (matches) {
+			// Correct but expired: do not penalise, just re-prompt.
+			handleInvalidSmsCode(context);
+			return;
+		}
+
+		// Wrong code: record the failure in the shared, cross-session store.
+		AuthenticatorConfigModel config = context.getRealm().getAuthenticatorConfigByAlias("sms-2fa");
+		Map<String, String> cfgMap = (config != null && config.getConfig() != null) ? config.getConfig() : Map.of();
+		int maxAttempts = OtpThrottling.intConfig(cfgMap, "maxVerifyAttempts", 5);
+		int lockSeconds = OtpThrottling.intConfig(cfgMap, "otpLockoutSeconds", 900);
+
+		context.getEvent().user(user).error(Errors.INVALID_USER_CREDENTIALS);
+		boolean nowLocked = OtpThrottling.recordFailure(context.getSession(), realm, user, maxAttempts, lockSeconds);
+		if (nowLocked) {
+			logger.warnf("Max OTP verification attempts (%d) reached for user: %s; locking OTP for %d s",
+				maxAttempts, user.getUsername(), lockSeconds);
+			context.challenge(context.form().setError("smsAuthMaxAttemptsReached").createErrorPage(Response.Status.BAD_REQUEST));
+			return;
+		}
+
+		handleInvalidSmsCode(context);
 	}
 
 	private void handlePhoneToAttribute(RequiredActionContext context, String mobileNumber) {

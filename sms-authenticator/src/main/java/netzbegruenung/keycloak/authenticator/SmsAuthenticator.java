@@ -35,7 +35,6 @@ import org.keycloak.models.AuthenticatorConfigModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
-import org.keycloak.models.SingleUseObjectProvider;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.events.Errors;
 import org.keycloak.theme.Theme;
@@ -64,6 +63,10 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 		RealmModel realm = context.getRealm();
 
 		if (isTemporarilyLockedOut(context)) {
+			return;
+		}
+
+		if (sendBudgetExceeded(context)) {
 			return;
 		}
 
@@ -157,19 +160,11 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 			return;
 		}
 
-		// Wrong code: track the failure in the single-use-object store, keyed by
-		// user. Unlike the brute-force login-failure store, this is NOT cleared
-		// when the user later re-enters a correct username/password, so the
-		// count survives starting a brand-new authentication session.
+		// Wrong code: record the failure in the shared, cross-session store.
 		int maxAttempts = getMaxVerifyAttempts(context);
 		int lockSeconds = getOtpLockoutSeconds(context);
 		RealmModel realm = context.getRealm();
 		UserModel user = context.getUser();
-		SingleUseObjectProvider store = context.getSession().singleUseObjects();
-		String failKey = failCountKey(context);
-
-		Map<String, String> failData = store.get(failKey);
-		int numFailures = (failData != null ? Integer.parseInt(failData.get("count")) : 0) + 1;
 
 		context.getEvent().user(user).error(Errors.INVALID_USER_CREDENTIALS);
 		// Also notify the brute force protector when it is enabled, so the
@@ -179,14 +174,8 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 				context.getConnection(), context.getUriInfo());
 		}
 
-		// Re-write the counter with a fresh expiry window each time.
-		store.remove(failKey);
-
-		if (numFailures >= maxAttempts) {
-			// Too many wrong guesses across all sessions: lock the OTP step for
-			// this user for a fixed window and abort the flow.
-			store.remove(lockKey(context));
-			store.put(lockKey(context), lockSeconds, Map.of("ts", Long.toString(System.currentTimeMillis())));
+		boolean nowLocked = OtpThrottling.recordFailure(context.getSession(), realm, user, maxAttempts, lockSeconds);
+		if (nowLocked) {
 			invalidateCode(authSession);
 			logger.warnf("Max OTP verification attempts (%d) reached for user: %s; locking OTP for %d s",
 				maxAttempts, user.getUsername(), lockSeconds);
@@ -195,30 +184,22 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 			return;
 		}
 
-		store.put(failKey, lockSeconds, Map.of("count", Integer.toString(numFailures)));
-
 		context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
 			context.form().setAttribute("realm", context.getRealm())
 				.setError("smsAuthCodeInvalid").createForm(TPL_CODE));
 	}
 
+	private static Map<String, String> cfg(AuthenticationFlowContext context) {
+		return context.getAuthenticatorConfig() != null
+			? context.getAuthenticatorConfig().getConfig() : Map.of();
+	}
+
 	private static int getMaxVerifyAttempts(AuthenticationFlowContext context) {
-		return getIntConfig(context, "maxVerifyAttempts", 5);
+		return OtpThrottling.intConfig(cfg(context), "maxVerifyAttempts", 5);
 	}
 
 	private static int getOtpLockoutSeconds(AuthenticationFlowContext context) {
-		return getIntConfig(context, "otpLockoutSeconds", 900);
-	}
-
-	private static int getIntConfig(AuthenticationFlowContext context, String key, int fallback) {
-		String configured = context.getAuthenticatorConfig() != null
-			? context.getAuthenticatorConfig().getConfig().get(key) : null;
-		try {
-			int value = Integer.parseInt(configured);
-			return value > 0 ? value : fallback;
-		} catch (NumberFormatException e) {
-			return fallback;
-		}
+		return OtpThrottling.intConfig(cfg(context), "otpLockoutSeconds", 900);
 	}
 
 	private static void invalidateCode(AuthenticationSessionModel authSession) {
@@ -226,21 +207,8 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 		authSession.removeAuthNote("ttl");
 	}
 
-	private static String failCountKey(AuthenticationFlowContext context) {
-		return "sms-otp-fail:" + context.getRealm().getId() + ":" + context.getUser().getId();
-	}
-
-	private static String lockKey(AuthenticationFlowContext context) {
-		return "sms-otp-lock:" + context.getRealm().getId() + ":" + context.getUser().getId();
-	}
-
 	private void clearOtpFailures(AuthenticationFlowContext context) {
-		if (context.getUser() == null) {
-			return;
-		}
-		SingleUseObjectProvider store = context.getSession().singleUseObjects();
-		store.remove(failCountKey(context));
-		store.remove(lockKey(context));
+		OtpThrottling.clear(context.getSession(), context.getRealm(), context.getUser());
 	}
 
 	/**
@@ -250,17 +218,32 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 	 * successful password, and does not require realm Brute Force Detection.
 	 */
 	private boolean isTemporarilyLockedOut(AuthenticationFlowContext context) {
-		if (context.getUser() == null) {
-			return false;
-		}
-		Map<String, String> lock = context.getSession().singleUseObjects().get(lockKey(context));
-		if (lock == null) {
+		if (!OtpThrottling.isLocked(context.getSession(), context.getRealm(), context.getUser())) {
 			return false;
 		}
 		logger.warnf("User %s is locked out of OTP; blocking OTP step", context.getUser().getUsername());
 		context.failureChallenge(AuthenticationFlowError.USER_TEMPORARILY_DISABLED,
 			context.form().setError("smsAuthAccountLocked").createErrorPage(Response.Status.UNAUTHORIZED));
 		return true;
+	}
+
+	/**
+	 * Counts this OTP send for the user and, when the per-user send budget is
+	 * exceeded, renders the "max attempts" page and returns true. Survives new
+	 * authentication sessions, so re-logging-in cannot reset the send budget.
+	 */
+	private boolean sendBudgetExceeded(AuthenticationFlowContext context) {
+		int maxSends = OtpThrottling.intConfig(cfg(context), "maxOtpSends", 5);
+		int window = getOtpLockoutSeconds(context);
+		if (OtpThrottling.registerSendAndIsExceeded(context.getSession(), context.getRealm(),
+				context.getUser(), maxSends, window)) {
+			logger.warnf("User %s exceeded OTP send budget (%d); refusing to send",
+				context.getUser().getUsername(), maxSends);
+			context.failureChallenge(AuthenticationFlowError.USER_TEMPORARILY_DISABLED,
+				context.form().setError("resendCodeMaxAttemptsReached").createErrorPage(Response.Status.TOO_MANY_REQUESTS));
+			return true;
+		}
+		return false;
 	}
 
 	@Override
