@@ -192,9 +192,9 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 			? context.getAuthenticatorConfig().getConfig().get("maxVerifyAttempts") : null;
 		try {
 			int value = Integer.parseInt(configured);
-			return value > 0 ? value : 3;
+			return value > 0 ? value : 5;
 		} catch (NumberFormatException e) {
-			return 3;
+			return 5;
 		}
 	}
 
