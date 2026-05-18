@@ -35,6 +35,7 @@ import org.keycloak.models.AuthenticatorConfigModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.SingleUseObjectProvider;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.events.Errors;
 import org.keycloak.theme.Theme;
@@ -44,6 +45,7 @@ import jakarta.ws.rs.core.Response;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.io.IOException;
 import java.util.Collections;
@@ -139,8 +141,10 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 			enteredCode.getBytes(StandardCharsets.UTF_8), code.getBytes(StandardCharsets.UTF_8));
 
 		if (isValid && Long.parseLong(ttl) >= System.currentTimeMillis()) {
-			// Valid and not expired: consume the code so it can never be replayed.
+			// Valid and not expired: consume the code so it can never be replayed
+			// and clear the accumulated OTP failure count for this user.
 			invalidateCode(authSession);
+			clearOtpFailures(context);
 			context.success();
 			return;
 		}
@@ -153,69 +157,110 @@ public class SmsAuthenticator implements Authenticator, CredentialValidator<SmsA
 			return;
 		}
 
-		// Wrong code: count the failed attempt per-session and feed Keycloak's
-		// per-user brute force protector (which persists across login sessions,
-		// so re-authenticating with the password does not reset the limit).
+		// Wrong code: track the failure in the single-use-object store, keyed by
+		// user. Unlike the brute-force login-failure store, this is NOT cleared
+		// when the user later re-enters a correct username/password, so the
+		// count survives starting a brand-new authentication session.
 		int maxAttempts = getMaxVerifyAttempts(context);
-		int attempts = Integer.parseInt(
-			authSession.getAuthNote(AUTH_NOTE_VERIFY_ATTEMPTS) != null
-				? authSession.getAuthNote(AUTH_NOTE_VERIFY_ATTEMPTS) : "0") + 1;
-		authSession.setAuthNote(AUTH_NOTE_VERIFY_ATTEMPTS, Integer.toString(attempts));
-
-		context.getEvent().user(context.getUser()).error(Errors.INVALID_USER_CREDENTIALS);
+		int lockSeconds = getOtpLockoutSeconds(context);
 		RealmModel realm = context.getRealm();
+		UserModel user = context.getUser();
+		SingleUseObjectProvider store = context.getSession().singleUseObjects();
+		String failKey = failCountKey(context);
+
+		Map<String, String> failData = store.get(failKey);
+		int numFailures = (failData != null ? Integer.parseInt(failData.get("count")) : 0) + 1;
+
+		context.getEvent().user(user).error(Errors.INVALID_USER_CREDENTIALS);
+		// Also notify the brute force protector when it is enabled, so the
+		// password step participates in lockout too (defense in depth).
 		if (realm.isBruteForceProtected()) {
-			context.getProtector().failedLogin(realm, context.getUser(),
+			context.getProtector().failedLogin(realm, user,
 				context.getConnection(), context.getUriInfo());
 		}
 
-		if (attempts >= maxAttempts) {
-			// Too many wrong guesses: invalidate the code and terminate the flow.
-			// The user must restart authentication, which is itself resend-capped.
+		// Re-write the counter with a fresh expiry window each time.
+		store.remove(failKey);
+
+		if (numFailures >= maxAttempts) {
+			// Too many wrong guesses across all sessions: lock the OTP step for
+			// this user for a fixed window and abort the flow.
+			store.remove(lockKey(context));
+			store.put(lockKey(context), lockSeconds, Map.of("ts", Long.toString(System.currentTimeMillis())));
 			invalidateCode(authSession);
-			logger.warnf("Max OTP verification attempts (%d) reached for user: %s; failing authentication",
-				maxAttempts, context.getUser().getUsername());
+			logger.warnf("Max OTP verification attempts (%d) reached for user: %s; locking OTP for %d s",
+				maxAttempts, user.getUsername(), lockSeconds);
 			context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
 				context.form().setError("smsAuthMaxAttemptsReached").createErrorPage(Response.Status.BAD_REQUEST));
 			return;
 		}
+
+		store.put(failKey, lockSeconds, Map.of("count", Integer.toString(numFailures)));
 
 		context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
 			context.form().setAttribute("realm", context.getRealm())
 				.setError("smsAuthCodeInvalid").createForm(TPL_CODE));
 	}
 
-	private static final String AUTH_NOTE_VERIFY_ATTEMPTS = "verifyAttempts";
-
 	private static int getMaxVerifyAttempts(AuthenticationFlowContext context) {
+		return getIntConfig(context, "maxVerifyAttempts", 5);
+	}
+
+	private static int getOtpLockoutSeconds(AuthenticationFlowContext context) {
+		return getIntConfig(context, "otpLockoutSeconds", 900);
+	}
+
+	private static int getIntConfig(AuthenticationFlowContext context, String key, int fallback) {
 		String configured = context.getAuthenticatorConfig() != null
-			? context.getAuthenticatorConfig().getConfig().get("maxVerifyAttempts") : null;
+			? context.getAuthenticatorConfig().getConfig().get(key) : null;
 		try {
 			int value = Integer.parseInt(configured);
-			return value > 0 ? value : 5;
+			return value > 0 ? value : fallback;
 		} catch (NumberFormatException e) {
-			return 5;
+			return fallback;
 		}
 	}
 
 	private static void invalidateCode(AuthenticationSessionModel authSession) {
 		authSession.removeAuthNote("code");
 		authSession.removeAuthNote("ttl");
-		authSession.removeAuthNote(AUTH_NOTE_VERIFY_ATTEMPTS);
 	}
 
-	private boolean isTemporarilyLockedOut(AuthenticationFlowContext context) {
-		RealmModel realm = context.getRealm();
-		UserModel user = context.getUser();
-		if (user != null && realm.isBruteForceProtected()
-			&& context.getProtector().isTemporarilyDisabled(context.getSession(), realm, user)) {
-			logger.warnf("User %s is temporarily locked out by brute force protection; blocking OTP step",
-				user.getUsername());
-			context.failureChallenge(AuthenticationFlowError.USER_TEMPORARILY_DISABLED,
-				context.form().setError("smsAuthAccountLocked").createErrorPage(Response.Status.UNAUTHORIZED));
-			return true;
+	private static String failCountKey(AuthenticationFlowContext context) {
+		return "sms-otp-fail:" + context.getRealm().getId() + ":" + context.getUser().getId();
+	}
+
+	private static String lockKey(AuthenticationFlowContext context) {
+		return "sms-otp-lock:" + context.getRealm().getId() + ":" + context.getUser().getId();
+	}
+
+	private void clearOtpFailures(AuthenticationFlowContext context) {
+		if (context.getUser() == null) {
+			return;
 		}
-		return false;
+		SingleUseObjectProvider store = context.getSession().singleUseObjects();
+		store.remove(failCountKey(context));
+		store.remove(lockKey(context));
+	}
+
+	/**
+	 * Returns true (and renders the locked-out page) when this user is currently
+	 * inside an OTP lockout window. Backed by the single-use-object store, so it
+	 * holds across a brand-new authentication session, is NOT cleared by a
+	 * successful password, and does not require realm Brute Force Detection.
+	 */
+	private boolean isTemporarilyLockedOut(AuthenticationFlowContext context) {
+		if (context.getUser() == null) {
+			return false;
+		}
+		Map<String, String> lock = context.getSession().singleUseObjects().get(lockKey(context));
+		if (lock == null) {
+			return false;
+		}
+		logger.warnf("User %s is locked out of OTP; blocking OTP step", context.getUser().getUsername());
+		context.failureChallenge(AuthenticationFlowError.USER_TEMPORARILY_DISABLED,
+			context.form().setError("smsAuthAccountLocked").createErrorPage(Response.Status.UNAUTHORIZED));
+		return true;
 	}
 
 	@Override
